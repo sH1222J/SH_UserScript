@@ -1,0 +1,11 @@
+// ==UserScript==
+// @name         chzzk-time-machine
+// @author       eta66 (eta66@proton.me)
+// @match        https://chzzk.naver.com/*
+// @grant        unsafeWindow
+// @run-at       document-start
+// @require      https://cdn.jsdelivr.net/npm/@violentmonkey/url
+// https://gist.github.com/eta66
+// ==/UserScript==
+
+(()=>{let e;async function t(){if(!location.pathname.includes("/live/"))return;new MutationObserver(((_,t)=>{const n=document.querySelector(".slider");n&&(n.remove(),t.disconnect())})).observe(document.body,{childList:!0,subtree:!0});const t=await fetch(`https://api.chzzk.naver.com/service/v1/channels/${location.pathname.split("/").pop()}/clip-time-machine-info`,{credentials:"include"});e=JSON.stringify((await t.json()).content.timeMachinePlayback)}unsafeWindow.XMLHttpRequest=class extends XMLHttpRequest{constructor(){super(),this.addEventListener("load",(()=>{if(this.responseURL.includes("live-detail")&&e){const t=JSON.parse(this.responseText);t.content.livePlaybackJson=e,t.content.p2pQuality=[],Object.defineProperty(this,"responseText",{value:JSON.stringify(t)})}if(this.responseURL.includes("live-status")){const e=JSON.parse(this.responseText);e.content.lastAdultReleaseDate=null,Object.defineProperty(this,"responseText",{value:JSON.stringify(e)})}}))}},VM.onNavigate(t),"loading"===document.readyState?document.addEventListener("DOMContentLoaded",t):t()})();
