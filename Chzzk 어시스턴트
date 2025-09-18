@@ -1,0 +1,1069 @@
+// ==UserScript==
+// @name         Chzzk 어시스턴트
+// @namespace    http://tampermonkey.net/
+// @version      1.0.1
+// @description  Chzzk 올인원 기반. 실시간 버튼 동작변경, 재생 속도, 자동 새로고침, PIP 단축키 등
+// @match        https://chzzk.naver.com/*
+// @icon         https://chzzk.naver.com/favicon.ico
+// @grant        GM.info
+// @grant        GM.getValue
+// @grant        GM.setValue
+// @grant        unsafeWindow
+// @run-at       document-start
+// @license      MIT
+// @downloadURL https://update.greasyfork.org/scripts/548377/Chzzk%20%EC%96%B4%EC%8B%9C%EC%8A%A4%ED%84%B4%ED%8A%B8.user.js
+// @updateURL https://update.greasyfork.org/scripts/548377/Chzzk%20%EC%96%B4%EC%8B%9C%EC%8A%A4%ED%84%B4%ED%8A%B8.meta.js
+// ==/UserScript==
+(async() => {
+    "use strict";
+
+    /**
+     * @class Config
+     * @description 스크립트의 모든 설정, 선택자, 유틸리티 함수를 중앙에서 관리하는 클래스.
+     */
+    class Config {
+        #applyCooldown = 1000;
+        #minTimeout = 1500;
+        #defaultTimeout = 2000;
+        #storageKeys = {
+            quality: "chzzkPreferredQuality",
+            autoUnmute: "chzzkAutoUnmute",
+            autoRefresh: "chzzkAutoRefresh",
+            debugLog: "chzzkDebugLog",
+            ignoredUpdate: "chzzkIgnoredUpdateDate",
+            playbackRate: "chzzkPlaybackRate",
+            autoLive1x: "chzzkAutoLive1x",
+            screenSharpness: "chzzkScreenSharp",
+        };
+        #selectors = {
+            popup: 'div[class^="popup_container"]',
+            woodbtn: 'button[class^="live_chatting_power_button__"]',
+            qualityBtn: 'button[command="SettingCommands.Toggle"]',
+            qualityItems: 'li.pzp-ui-setting-quality-item[role="menuitem"]',
+            pipBtns: [
+                'button[aria-label*="pip" i]', 'button[aria-label*="PiP" i]', 'button[aria-label*="미니" i]',
+                'button[aria-label*="화면 속 화면" i]', 'button[command*="PictureInPicture"]', 'button[command*="Pip"]',
+            ],
+            videoPlayer: 'div[class*="live_information_player__"]',
+            errorDialog: '.pzp-pc-ui-error-dialog--large',
+            rightBoundary: 'div[class*="toolbar_section__"]',
+            chatInput: '.live_chatting_input_input__2F3Et',
+        };
+        #regex = {
+            adBlockDetect: /광고\s*차단\s*프로그램.*사용\s*중/i,
+            chzzkId: /(?:live|video)\/(?<id>[^/]+)/,
+        };
+        #constants = {
+            DISPLAY_BLOCK: 'block',
+            DISPLAY_NONE: 'none',
+            RELOAD_DELAY_MS: 100,
+            LIVE_EDGE_SECONDS: 5,
+            QUALITY_RECOVERY_TIMEOUT_MS: 120000,
+            QUALITY_CHECK_INTERVAL_MS: 30000,
+            AUTO_ONEX_INTERVAL_MS: 500,
+            STALL_CHECK_INTERVAL_MS: 5000,
+            STALL_THRESHOLD_MS: 5000,
+            TOAST_DISPLAY_TIME_MS: 1000,
+            PLAYBACK_RATES: [0.25, 0.5, 0.75, 1.0, 1.25, 1.5, 2.0],
+        };
+        #debug = false;
+
+        /** @returns {number} 자동 적용 기능의 최소 실행 간격 (ms) */
+        get applyCooldown() {
+            return this.#applyCooldown;
+        }
+        /** @returns {number} 비동기 작업의 최소 타임아웃 (ms) */
+        get minTimeout() {
+            return this.#minTimeout;
+        }
+        /** @returns {number} 비동기 작업의 기본 타임아웃 (ms) */
+        get defaultTimeout() {
+            return this.#defaultTimeout;
+        }
+        /** @returns {object} Tampermonkey 저장소 키 목록 */
+        get storageKeys() {
+            return this.#storageKeys;
+        }
+        /** @returns {object} DOM 요소 선택자 목록 */
+        get selectors() {
+            return this.#selectors;
+        }
+        /** @returns {object} 정규 표현식 목록 */
+        get regex() {
+            return this.#regex;
+        }
+        /** @returns {object} 스크립트에서 사용하는 상수 값 목록 */
+        get constants() {
+            return this.#constants;
+        }
+        /** @returns {boolean} 디버그 로그 활성화 여부 */
+        get debug() {
+            return this.#debug;
+        }
+        /** @param {boolean} v - 디버그 로그 활성화 상태 */
+        set debug(v) {
+            this.#debug = !!v;
+        }
+
+        /**
+         * 지정된 시간(ms)만큼 실행을 지연시킵니다.
+         * @param {number} ms - 지연시킬 시간 (ms).
+         * @returns {Promise<void>}
+         */
+        sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+        /**
+         * 특정 CSS 선택자에 해당하는 요소가 나타날 때까지 기다립니다.
+         * @param {string} selector - 기다릴 요소의 CSS 선택자.
+         * @param {number} [timeout=this.#defaultTimeout] - 대기할 최대 시간 (ms).
+         * @returns {Promise<Element>} 발견된 요소를 resolve하는 프로미스.
+         */
+        waitFor = (selector, timeout = this.#defaultTimeout) => {
+            const effective = Math.max(timeout, this.#minTimeout);
+            return new Promise((resolve, reject) => {
+                const el = document.querySelector(selector);
+                if (el)
+                    return resolve(el);
+                const mo = new MutationObserver(() => {
+                    const found = document.querySelector(selector);
+                    if (found) {
+                        mo.disconnect();
+                        resolve(found);
+                    }
+                });
+                mo.observe(document.body, {
+                    childList: true,
+                    subtree: true
+                });
+                setTimeout(() => {
+                    mo.disconnect();
+                    reject(new Error("Timeout waiting for " + selector));
+                }, effective);
+            });
+        };
+        /**
+         * 텍스트에서 해상도 값을 숫자로 추출합니다. (예: "1080p" -> 1080)
+         * @param {string} txt - 해상도 정보가 포함된 텍스트.
+         * @returns {number|null} 추출된 해상도 숫자 또는 null.
+         */
+        extractResolution = (txt) => {
+            const m = String(txt || "").match(/(\d{3,4})p/);
+            return m ? parseInt(m[1], 10) : null;
+        };
+    }
+    const C = new Config();
+    const K = C.constants;
+    /**
+     * 현재 페이지의 비디오 요소를 반환합니다.
+     * @returns {HTMLVideoElement|null} 비디오 요소 또는 null.
+     */
+    const getVideo = () => document.querySelector("video");
+
+    /**
+     * @namespace AllInOneMenu
+     * @description 스크립트 설정 메뉴 UI를 생성하고 관리합니다.
+     */
+    const AllInOneMenu = {
+        uiInterval: null,
+        /**
+         * 메뉴 UI에 필요한 스타일을 페이지에 주입합니다.
+         */
+        injectStyles() {
+            if (document.getElementById('chzzk-allinone-styles'))
+                return;
+            const customStyles = document.createElement('style');
+            customStyles.id = 'chzzk-allinone-styles';
+            customStyles.textContent = `
+                .allinone-settings-button:hover { background-color: var(--Surface-Interaction-Lighten-Hovered); border-radius: 6px; }
+                .button_label__fyHZ6 { align-items: center; background-color: var(--Surface-Neutral-Base); border-radius: 6px; box-shadow: 0 2px 2px var(--Shadow-Strong),0 2px 6px 2px var(--Shadow-Base); color: var(--Content-Neutral-Cool-Stronger); display: inline-flex; font-family: -apple-system,BlinkMacSystemFont,Apple SD Gothic Neo,Helvetica,Arial,NanumGothic,나눔고딕,Malgun Gothic,맑은 고딕,Dotum,굴림,gulim,새굴림,noto sans,돋움,sans-serif; font-size: 12px; font-weight: 400; height: 27px; justify-content: center; letter-spacing: -.3px; line-height: 17px; padding: 0 9px; position: absolute; white-space: nowrap; z-index: 15000; }
+                .allinone-tooltip-position { top: calc(100% + 2px); right: -10px; }
+                .chzzk-speed-toast {
+                    position: absolute; top: 24px; left: 50%; transform: translateX(-50%);
+                    background-color: rgba(0, 0, 0, 0.8); color: #fff; padding: 10px 20px;
+                    border-radius: 6px; font-size: 16px; font-weight: bold; z-index: 10000; opacity: 0;
+                    transition: opacity 0.2s ease-in-out; pointer-events: none; white-space: nowrap;
+                }
+                .chzzk-speed-toast.visible { opacity: 1; }
+            `;
+            document.head.appendChild(customStyles);
+        },
+        /**
+         * 설정 메뉴를 여는 버튼을 생성합니다.
+         * @returns {HTMLButtonElement} 생성된 버튼 요소.
+         */
+        createButton() {
+            const btn = document.createElement('button');
+            btn.type = 'button';
+            btn.className = 'button_container__ppWwB button_only_icon__kahz5 button_larger__4NrSP allinone-settings-button';
+            btn.innerHTML = `<svg width="28" height="28" color="currentColor" viewBox="0 0 40 40" fill="none" xmlns="http://www.w3.org/2000/svg" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="transform: scale(1.4);"><g transform="translate(8,8)"><path d="M4.5 12a7.5 7.5 0 0 0 15 0m-15 0a7.5 7.5 0 1 1 15 0m-15 0H3m16.5 0H21m-1.5 0H12m-8.457 3.077 1.41-.513m14.095-5.13 1.41-.513M5.106 17.785l1.15-.964m11.49-9.642 1.149-.964M7.501 19.795l.75-1.3m7.5-12.99.75-1.3m-6.063 16.658.26-1.477m2.605-14.772.26-1.477m0 17.726-.26-1.477M10.698 4.614l-.26-1.477M16.5 19.794l-.75-1.299M7.5 4.205 12 12m6.894 5.785-1.149-.964M6.256 7.178l-1.15-.964m15.352 8.864-1.41-.513M4.954 9.435l-1.41-.514M12.002 12l-3.75 6.495"></path></g></svg><span class="blind">어시스턴트 설정</span>`;
+
+            btn.addEventListener('mouseenter', () => {
+                const parent = btn.parentElement;
+                if (!parent || parent.querySelector('.button_label__fyHZ6'))
+                    return;
+                const tooltip = document.createElement('span');
+                tooltip.className = 'button_label__fyHZ6 allinone-tooltip-position';
+                tooltip.textContent = '어시스턴트 설정';
+                parent.appendChild(tooltip);
+            });
+            btn.addEventListener('mouseleave', () => {
+                const tooltip = btn.parentElement?.querySelector('.button_label__fyHZ6');
+                if (tooltip)
+                    tooltip.remove();
+            });
+            return btn;
+        },
+        /**
+         * 설정 메뉴의 드롭다운 UI를 생성합니다.
+         * @returns {HTMLDivElement} 생성된 메뉴 요소.
+         */
+        createMenu() {
+            const menu = document.createElement('div');
+            menu.className = 'allinone-settings-menu';
+            Object.assign(menu.style, {
+                position: 'absolute',
+                background: 'var(--color-bg-layer-02)',
+                borderRadius: '10px',
+                boxShadow: '0 8px 20px var(--color-shadow-layer01-02), 0 0 1px var(--color-shadow-layer01-01)',
+                color: 'var(--color-content-03)',
+                overflow: 'auto',
+                padding: '18px',
+                right: '0px',
+                top: 'calc(100% + 7px)',
+                width: '240px',
+                zIndex: 13000,
+                display: K.DISPLAY_NONE
+            });
+
+            const helpContent = document.createElement('div');
+            helpContent.className = 'allinone-help-content';
+            Object.assign(helpContent.style, {
+                display: K.DISPLAY_NONE,
+                margin: '4px 0',
+                padding: '4px 8px 4px 34px',
+                fontFamily: 'Sandoll Nemony2, Apple SD Gothic NEO, Helvetica Neue, Helvetica, NanumGothic, Malgun Gothic, gulim, noto sans, Dotum, sans-serif',
+                fontSize: '14px',
+                color: 'var(--color-content-03)',
+                whiteSpace: 'pre-wrap'
+            });
+            helpContent.innerHTML = `<h2 style="color: var(--color-content-chzzk-02); margin-bottom:6px;">메뉴 사용법</h2><div style="white-space:pre-wrap; line-height:1.4; font-size:14px; color:inherit;"><strong style="display:block; font-weight:600; margin:6px 0 2px;">1. 자동 언뮤트</strong>방송이 시작되면 자동으로 음소거를 해제합니다.\n\n<strong style="display:block; font-weight:600; margin:6px 0 2px;">2. 자동 새로고침</strong>스트리밍 오류 창이 뜨면 즉시, 영상이 5초 이상 멈추면 잠시 후 페이지를 자동으로 새로고침합니다.\n\n<strong style="display:block; font-weight:600; margin:6px 0 2px;">3. 선명한 화면 2.0</strong>외부 스크립트를 적용하여 기본 선명도 기능을 대체합니다.</div>`;
+
+            const helpBtn = document.createElement('button');
+            Object.assign(helpBtn, {
+                className: 'allinone-settings-item',
+                style: 'display: flex; align-items: center; margin: 8px 0; padding: 4px 8px; font-family: Sandoll Nemony2, "Apple SD Gothic NEO", "Helvetica Neue", Helvetica, NanumGothic, "Malgun Gothic", gulim, "noto sans", Dotum, sans-serif; font-size: 14px; color: inherit;'
+            });
+            helpBtn.innerHTML = `<svg xmlns="http://www.w3.org/2000/svg" width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" style="margin-right:10px;" color="inherit"><circle cx="12" cy="12" r="10"></circle><path d="M9.09 9a3 3 0 1 1 5.82 1c-.5 1.3-2.91 2-2.91 2"></path><line x1="12" y1="17" x2="12.01" y2="17"></line></svg><span style="margin-left:8px">도움말</span>`;
+            helpBtn.addEventListener('click', () => {
+                helpContent.style.display = helpContent.style.display === K.DISPLAY_NONE ? K.DISPLAY_BLOCK : K.DISPLAY_NONE;
+            });
+
+            menu.appendChild(helpBtn);
+            menu.appendChild(helpContent);
+
+            const unmuteSvgOff = `<svg class="profile_layer_icon__7g3e-" xmlns="http://www.w3.org/2000/svg" width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path stroke-linecap="round" stroke-linejoin="round" d="M17.25 9.75L19.5 12m0 0l2.25 2.25M19.5 12l2.25-2.25M19.5 12l-2.25 2.25m-10.5-6l4.72-4.72a.75.75 0 011.28.53v15.88a.75.75 0 01-1.28.53l-4.72-4.72H4.51c-.88 0-1.704-.507-1.938-1.354A9.009 9.009 0 012.25 12c0-.83.112-1.633.322-2.396C2.806 8.756 3.63 8.25 4.51 8.25H6.75Z"/></svg>`;
+            const unmuteSvgOn = `<svg class="profile_layer_icon__7g3e-" xmlns="http://www.w3.org/2000/svg" width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path stroke-linecap="round" stroke-linejoin="round" d="M19.114 5.636a9 9 0 010 12.728M16.463 8.288a5.25 5.25 0 010 7.424M6.75 8.25l4.72-4.72a.75.75 0 011.28.53v15.88a.75.75 0 01-1.28.53l-4.72-4.72H4.51c-.88 0-1.704-.507-1.938-1.354A9.009 9.009 0 012.25 12c0-.83.112-1.633.322-2.396C2.806 8.756 3.63 8.25 4.51 8.25H6.75Z"/></svg>`;
+            const refreshSvg = `<svg class="profile_layer_icon__7g3e-" xmlns="http://www.w3.org/2000/svg" width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/></svg>`;
+            const sharpSvg = `<svg class="profile_layer_icon__7g3e-" xmlns="http://www.w3.org/2000/svg" width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path stroke-linecap="round" stroke-linejoin="round" d="M6 20.25h12m-7.5-3v3m3-3v3m-10.125-3h17.25c.621 0 1.125-.504 1.125-1.125V4.875c0-.621-.504-1.125-1.125-1.125H3.375c-.621 0-1.125.504-1.125 1.125v11.25c0 .621.504 1.125 1.125 1.125Z"/></svg>`;
+
+            [{
+                    key: C.storageKeys.autoUnmute,
+                    svg: unmuteSvgOff,
+                    onSvg: unmuteSvgOn,
+                    label: '자동 언뮤트',
+                default:
+                    true
+                }, {
+                    key: C.storageKeys.autoRefresh,
+                    svg: refreshSvg,
+                    onSvg: refreshSvg,
+                    label: '자동 새로고침',
+                default:
+                    true
+                }, {
+                    key: C.storageKeys.screenSharpness,
+                    svg: sharpSvg,
+                    onSvg: sharpSvg,
+                    label: '선명한 화면 2.0',
+                default:
+                    false
+                }
+            ].forEach(item => {
+                const itemBtn = document.createElement('button');
+                itemBtn.className = 'allinone-settings-item';
+                Object.assign(itemBtn.style, {
+                    display: 'flex',
+                    alignItems: 'center',
+                    margin: '8px 0',
+                    padding: '4px 8px',
+                    fontFamily: 'Sandoll Nemony2, "Apple SD Gothic NEO", "Helvetica Neue", Helvetica, NanumGothic, "Malgun Gothic", gulim, "noto sans", Dotum, sans-serif',
+                    fontSize: '14px',
+                    color: 'inherit'
+                });
+                itemBtn.innerHTML = `${item.svg}<span style="margin-left:8px">${item.label} <span class="state-text">OFF</span></span>`;
+
+                GM.getValue(item.key, item.default).then(active => {
+                    itemBtn.style.opacity = active ? '1' : '0.4';
+                    if (active && item.onSvg)
+                        itemBtn.querySelector('svg').outerHTML = item.onSvg;
+                    itemBtn.querySelector('.state-text').textContent = active ? 'ON' : 'OFF';
+                });
+
+                itemBtn.addEventListener('click', async() => {
+                    const current = await GM.getValue(item.key, item.default);
+                    const active = !current;
+                    await GM.setValue(item.key, active);
+
+                    const btnToUpdate = menu.querySelector(`[data-key="${item.key}"]`) || itemBtn;
+                    btnToUpdate.style.opacity = active ? '1' : '0.4';
+                    if (active && item.onSvg)
+                        btnToUpdate.querySelector('svg').outerHTML = item.onSvg;
+                    else
+                        btnToUpdate.querySelector('svg').outerHTML = item.svg;
+                    btnToUpdate.querySelector('.state-text').textContent = active ? 'ON' : 'OFF';
+
+                    if (item.key === C.storageKeys.screenSharpness) {
+                        setTimeout(() => location.reload(), 100);
+                    }
+                });
+                itemBtn.dataset.key = item.key;
+                menu.appendChild(itemBtn);
+            });
+            return menu;
+        },
+        /**
+         * UI에 설정 버튼이 없는 경우 주입합니다. 주기적으로 호출되어 UI 변경에 대응합니다.
+         */
+        ensureMenuExists() {
+            const toolbar = document.querySelector(C.selectors.rightBoundary);
+            if (!toolbar || toolbar.querySelector('.allinone-settings-wrapper'))
+                return;
+
+            const profileItemWrapper = toolbar.querySelector('.toolbar_profile_button__tZxIO')?.closest('.toolbar_item__w9Z7l');
+            const parentBox = profileItemWrapper?.parentElement;
+            if (!profileItemWrapper || !parentBox)
+                return;
+
+            const itemWrapper = document.createElement('div');
+            itemWrapper.className = 'toolbar_item__w9Z7l allinone-settings-wrapper';
+            itemWrapper.style.position = 'relative';
+
+            const button = this.createButton();
+            const menu = this.createMenu();
+            itemWrapper.appendChild(button);
+            itemWrapper.appendChild(menu);
+
+            parentBox.insertBefore(itemWrapper, profileItemWrapper);
+
+            button.addEventListener('click', e => {
+                e.stopPropagation();
+                menu.style.display = (menu.style.display === K.DISPLAY_BLOCK ? K.DISPLAY_NONE : K.DISPLAY_BLOCK);
+            });
+            document.addEventListener('click', e => {
+                if (!menu.contains(e.target) && e.target !== button)
+                    menu.style.display = K.DISPLAY_NONE;
+            });
+        },
+        /**
+         * 설정 메뉴 기능의 초기화를 담당합니다.
+         */
+        init() {
+            this.injectStyles();
+            if (this.uiInterval)
+                return;
+            this.uiInterval = setInterval(() => {
+                this.ensureMenuExists();
+                patchPipButton();
+                findAndPatchLiveButtons(document);
+            }, 1000);
+        }
+    };
+
+    /**
+     * @namespace quality
+     * @description 비디오 화질 설정과 관련된 기능을 관리합니다.
+     */
+    const quality = {
+        isRecovering: false,
+        _applying: false,
+        _lastApply: 0,
+        /**
+         * 사용자가 수동으로 화질을 변경하는 것을 감지하여 선호 화질로 저장합니다.
+         */
+        observeManualSelect() {
+            document.body.addEventListener("click", async(e) => {
+                const li = e.target.closest('li[class*="quality"]');
+                if (!li)
+                    return;
+                const res = C.extractResolution(li.textContent);
+                if (res)
+                    await GM.setValue(C.storageKeys.quality, res);
+            }, {
+                capture: true
+            });
+        },
+        /**
+         * 저장된 선호 화질 값을 불러옵니다.
+         * @returns {Promise<number>} 선호 화질.
+         */
+        async getPreferred() {
+            return parseInt(await GM.getValue(C.storageKeys.quality, 1080), 10);
+        },
+        /**
+         * 저장된 선호 화질을 비디오 플레이어에 자동으로 적용합니다.
+         * @returns {Promise<void>}
+         */
+        async applyPreferred() {
+            const now = Date.now();
+            if (this._applying || now - this._lastApply < C.applyCooldown)
+                return;
+            this._applying = true;
+            this._lastApply = now;
+
+            try {
+                const qualityBtn = await C.waitFor(C.selectors.qualityBtn, 3000);
+
+                if (!document.querySelector(C.selectors.qualityItems)) {
+                    qualityBtn.click();
+                }
+
+                const items = await C.waitFor(C.selectors.qualityItems, 3000).then(() => Array.from(document.querySelectorAll(C.selectors.qualityItems)));
+                if (!items.length)
+                    throw new Error("Quality items not found after opening menu.");
+
+                const target = await GM.getValue(C.storageKeys.quality, 1080);
+                const targetItem = items.find(i => C.extractResolution(i.textContent) === target) || items.find(i => /\d+p/.test(i.textContent)) || items[0];
+
+                const isAlreadySelected = targetItem.className.includes('--checked');
+
+                if (!isAlreadySelected) {
+                    targetItem.click();
+                    await C.sleep(200);
+                }
+
+                if (document.querySelector(C.selectors.qualityItems)) {
+                    document.body.click();
+                }
+
+            } catch (e) {
+                console.error("AIO Script: Failed to apply preferred quality.", e);
+                if (document.querySelector(C.selectors.qualityItems)) {
+                    document.body.click();
+                }
+            } finally {
+                this._applying = false;
+            }
+        },
+        /**
+         * 비디오 화질이 낮아졌을 경우 선호 화질로 복구를 시도합니다.
+         * @param {HTMLVideoElement} video - 화질을 검사할 비디오 요소.
+         */
+        checkAndFix(video) {
+            if (!video || video.__qualityMonitorAttached)
+                return;
+            video.__qualityMonitorAttached = true;
+            const performCheck = async() => {
+                if (video.paused || this.isRecovering)
+                    return;
+                const currentHeight = video.videoHeight;
+                if (currentHeight === 0)
+                    return;
+                const preferred = await this.getPreferred();
+                if (currentHeight < preferred) {
+                    this.isRecovering = true;
+                    await this.applyPreferred();
+                    setTimeout(() => {
+                        this.isRecovering = false;
+                    }, K.QUALITY_RECOVERY_TIMEOUT_MS);
+                }
+            };
+            video.addEventListener('loadedmetadata', performCheck);
+            setInterval(performCheck, C.constants.QUALITY_CHECK_INTERVAL_MS);
+        }
+    };
+
+    /**
+     * @namespace handler
+     * @description 페이지의 네이티브 동작(URL 변경)을 감시하는 기능을 관리합니다.
+     */
+    const handler = {
+        /**
+         * SPA(Single Page Application) 환경에서 URL 변경을 감지하여 관련 기능을 실행합니다.
+         */
+        trackURLChange() {
+            let lastUrl = location.href,
+            lastId = null;
+            const getId = (url) => (typeof url === 'string' ? (url.match(C.regex.chzzkId)?.groups?.id || null) : null);
+            const onUrlChange = () => {
+                if (location.href === lastUrl)
+                    return;
+                lastUrl = location.href;
+                const id = getId(lastUrl);
+                if (id && id !== lastId) {
+                    lastId = id;
+                    setTimeout(() => {
+                        quality.applyPreferred();
+                        monitorStream();
+                        injectSharpnessScript();
+                        if (window.sharpness?.init && window.sharpness?.observeMenus) {
+                            window.sharpness.init();
+                            window.sharpness.observeMenus();
+                        }
+                    }, C.minTimeout);
+                }
+            };
+            ["pushState", "replaceState"].forEach(m => {
+                const orig = history[m];
+                history[m] = function (...a) {
+                    const r = orig.apply(this, a);
+                    window.dispatchEvent(new Event("locationchange"));
+                    return r;
+                };
+            });
+            window.addEventListener("popstate", () => window.dispatchEvent(new Event("locationchange")));
+            window.addEventListener("locationchange", onUrlChange);
+        }
+    };
+
+    /**
+     * @namespace observer
+     * @description MutationObserver를 사용하여 DOM 변경을 감시하고 대응하는 기능을 관리합니다.
+     */
+    const observer = {
+        /**
+         * DOM 변경을 감시하는 MutationObserver를 시작합니다.
+         */
+        start() {
+            const mo = new MutationObserver(muts => {
+                for (const mut of muts) {
+                    for (const node of mut.addedNodes) {
+                        if (node.nodeType !== 1)
+                            continue;
+                        this.tryRemoveAdPopup(node);
+                        this.autoClickPowerButton(node);
+                        injectSpeedInlineButton();
+                        findAndPatchLiveButtons(node);
+                        patchPipButton(node);
+                        let vid = (node.tagName === "VIDEO") ? node : node.querySelector("video");
+                        if (/^\/live\/[^/]+/.test(location.pathname) && vid) {
+                            this.unmuteAll(vid);
+                            quality.checkAndFix(vid);
+                            monitorStream();
+                            (async() => {
+                                await new Promise(r => {
+                                    const w = () => (vid.readyState >= 2) ? r() : setTimeout(w, 100);
+                                    w();
+                                });
+                                try {
+                                    await vid.play();
+                                } catch {}
+                                applyPlaybackRate(1.0);
+                                __updateSpeedActive(1.0);
+                            })();
+                        }
+                    }
+                }
+            });
+            mo.observe(document.body, {
+                childList: true,
+                subtree: true,
+                attributes: true,
+                attributeFilter: ["style"]
+            });
+        },
+        /**
+         * 비디오 플레이어의 음소거를 해제합니다.
+         * @param {HTMLVideoElement} video - 음소거를 해제할 비디오 요소.
+         */
+        async unmuteAll(video) {
+            if (!await GM.getValue(C.storageKeys.autoUnmute, true))
+                return;
+            if (video.muted)
+                video.muted = false;
+            document.querySelector('button.pzp-pc-volume-button[aria-label*="음소거 해제"]')?.click();
+        },
+        /**
+         * 광고 차단 안내 팝업을 감지하고 제거합니다.
+         * @param {Node} root - 검색을 시작할 DOM 노드.
+         */
+        tryRemoveAdPopup(root = document) {
+            try {
+                const popups = root.querySelectorAll(`${C.selectors.popup}:not([data-popup-handled])`);
+                for (const popup of popups) {
+                    if (C.regex.adBlockDetect.test(popup.textContent || "")) {
+                        popup.dataset.popupHandled = 'true';
+                        popup.style.display = 'none';
+                        const btn = popup.querySelector('button');
+                        if (!btn)
+                            continue;
+                        const fiberKey = Object.keys(btn).find(k => k.startsWith('__reactFiber$') || k.startsWith('__reactInternalInstance$'));
+                        const props = fiberKey ? (btn[fiberKey]?.memoizedProps || btn[fiberKey]?.return ?.memoizedProps) : null;
+                        const on = props?.confirmHandler || props?.onClick || props?.onClickHandler;
+                        on?.({
+                            isTrusted: true
+                        });
+                        return;
+                    }
+                }
+            } catch {}
+        },
+        /**
+         * 19+ 방송의 '네, 확인했습니다.' 버튼을 자동으로 클릭합니다.
+         * @param {Node} root - 검색을 시작할 DOM 노드.
+         */
+        autoClickPowerButton(root = document) {
+            root.querySelectorAll(C.selectors.woodbtn).forEach(btn => {
+                if (!btn.dataset.powerButtonHandled) {
+                    btn.dataset.powerButtonHandled = 'true';
+                    btn.click();
+                }
+            });
+        },
+    };
+
+    /**
+     * 저장된 선호 재생 속도를 가져옵니다.
+     * @returns {Promise<number>} 선호 재생 속도.
+     */
+    async function getPreferredRate() {
+        return Number(await GM.getValue(C.storageKeys.playbackRate, 1.0)) || 1.0;
+    }
+    /**
+     * 새로운 재생 속도를 저장합니다.
+     * @param {number} v - 저장할 재생 속도.
+     */
+    async function setPreferredRate(v) {
+        await GM.setValue(C.storageKeys.playbackRate, v);
+    }
+
+    const __tmSpeedUIs = new Set();
+    /**
+     * 재생 속도 UI의 텍스트를 업데이트합니다.
+     * @param {number} rate - 현재 재생 속도.
+     */
+    function __updateSpeedActive(rate) {
+        const lbl = document.querySelector('#tm-speed-inline-btn .tm-speed-inline-label');
+        if (lbl)
+            lbl.textContent = `${rate}x`;
+        __tmSpeedUIs.forEach(fn => {
+            try {
+                fn(rate);
+            } catch {}
+        });
+    }
+    /**
+     * 비디오 요소에 재생 속도를 적용합니다.
+     * @param {number} rate - 적용할 재생 속도.
+     */
+    function applyPlaybackRate(rate) {
+        const v = getVideo();
+        if (v)
+            v.playbackRate = rate;
+        __updateSpeedActive(rate);
+    }
+
+    /**
+     * 라이브 방송의 맨 끝으로 탐색합니다.
+     */
+    function seekToLiveEdge() {
+        const v = getVideo();
+        if (!v)
+            return;
+        try {
+            const end = (v.seekable && v.seekable.length) ? v.seekable.end(v.seekable.length - 1) : (!isNaN(v.duration) ? v.duration : Infinity);
+            if (isFinite(end))
+                v.currentTime = Math.max(0, end - 0.5);
+            v.play?.();
+            setTimeout(updateLiveTimeDotColor, 50);
+        } catch {}
+    }
+
+    /**
+     * 현재 라이브 스트림의 끝에 있는지 확인합니다.
+     * @returns {boolean} 라이브 끝에 있는지 여부.
+     */
+    const __isLive = () => {
+        const v = getVideo();
+        if (!v)
+            return false;
+        try {
+            const end = (v.seekable && v.seekable.length) ? v.seekable.end(v.seekable.length - 1) : v.duration;
+            const dist = end - v.currentTime;
+            return isFinite(dist) && dist <= K.LIVE_EDGE_SECONDS;
+        } catch {
+            return false;
+        }
+    }
+
+    /**
+     * 라이브 시간 표시 점의 색상을 업데이트합니다.
+     */
+    function updateLiveTimeDotColor() {
+        const color = __isLive() ? '#fb1f1f' : '#838285';
+        document.querySelectorAll('button[class*="live_time_button"] span[class*="live_time_dot"]').forEach(dot => {
+            if (dot.closest('[class*="live_chatting"]'))
+                return;
+            dot.style.backgroundColor = color;
+        });
+    }
+
+    /**
+     * 라이브 시간 표시 점의 색상을 주기적으로 업데이트하는 타이머를 시작합니다.
+     */
+    function startLiveDotWatcher() {
+        if (window.__chzzkDotTimer)
+            return;
+        window.__chzzkDotTimer = setInterval(updateLiveTimeDotColor, 500);
+        updateLiveTimeDotColor();
+    }
+
+    /**
+     * '실시간' 버튼의 기본 동작을 수정하여 라이브 끝으로 탐색하도록 합니다.
+     * @param {Node} root - 검색을 시작할 DOM 노드.
+     */
+    function findAndPatchLiveButtons(root = document) {
+        const buttons = root.querySelectorAll('button[class*="live_time_button"]');
+        buttons.forEach(btn => {
+            if (btn.dataset.tmListener)
+                return;
+            btn.dataset.tmListener = 'true';
+            btn.addEventListener('mousedown', (e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                seekToLiveEdge();
+            }, true);
+            btn.addEventListener('click', (e) => {
+                e.preventDefault();
+                e.stopPropagation();
+            }, true);
+        });
+    }
+
+    /**
+     * 플레이어 컨트롤 바에 재생 속도 조절 UI를 추가합니다.
+     */
+    function injectSpeedInlineButton() {
+        const settingsBtn = document.querySelector(C.selectors.qualityBtn);
+        if (!settingsBtn || document.getElementById('tm-speed-inline-btn'))
+            return;
+
+        let pipBtn = C.selectors.pipBtns.map(s => document.querySelector(s)).find(el => el);
+        const btn = document.createElement('button');
+        btn.id = 'tm-speed-inline-btn';
+        btn.type = 'button';
+        btn.setAttribute('aria-label', '재생 속도');
+        btn.className = settingsBtn.className;
+        btn.style.position = 'relative';
+        btn.innerHTML = `<span class="tm-speed-inline-label" style="display:inline-block; min-width:30px; text-align:center; font-weight:700; font-size:12px; color:#fff;">1x</span>`;
+
+        const target = (pipBtn && pipBtn.parentNode === settingsBtn.parentNode) ? pipBtn : settingsBtn;
+        target.insertAdjacentElement(pipBtn ? 'afterend' : 'beforebegin', btn);
+
+        const portal = document.createElement('div');
+        portal.id = 'tm-speed-popover-host';
+        document.body.appendChild(portal);
+        const sr = portal.attachShadow({
+            mode: 'open'
+        });
+
+        sr.innerHTML = `<style>:host{all:initial}.panel{position:fixed;z-index:2147483647;background:rgba(20,20,24,.98);color:#fff;border:1px solid rgba(255,255,255,.15);border-radius:10px;padding:10px;box-shadow:0 10px 30px rgba(0,0,0,.45);}.grid{display:grid;grid-template-columns:1fr;gap:6px}.btn{all:unset;display:inline-block;text-align:center;cursor:pointer;padding:8px 10px;font-size:12px;line-height:1;border-radius:8px;color:#fff;background:transparent;user-select:none}.btn:hover{background:rgba(255,255,255,.12)}.btn.active{background:rgba(255,255,255,.1);outline:1px solid rgba(255,255,255,.18)}.hidden{display:none}</style>`;
+
+        const panel = document.createElement('div');
+        panel.className = 'panel hidden';
+        const grid = document.createElement('div');
+        grid.className = 'grid';
+        K.PLAYBACK_RATES.forEach(r => {
+            const b = document.createElement('button');
+            b.className = 'btn';
+            b.textContent = `${r}x`;
+            b.addEventListener('click', async e => {
+                e.preventDefault();
+                await setPreferredRate(r);
+                applyPlaybackRate(r);
+                hide();
+            });
+            grid.appendChild(b);
+        });
+        panel.appendChild(grid);
+        sr.appendChild(panel);
+
+        const updateActive = r => sr.querySelectorAll('.btn').forEach(b => b.classList.toggle('active', b.textContent === `${r}x`));
+        __tmSpeedUIs.add(updateActive);
+
+        const hide = () => {
+            panel.classList.add('hidden');
+            window.removeEventListener('pointerdown', onOutside, true);
+        };
+        const onOutside = e => {
+            if (e.target !== btn && !e.composedPath().includes(panel))
+                hide();
+        };
+        const show = () => {
+            const tooltip = btn.querySelector('.pzp-button__tooltip');
+            if (tooltip)
+                tooltip.remove();
+
+            panel.classList.remove('hidden');
+            const rect = btn.getBoundingClientRect();
+            const pw = 60;
+            panel.style.left = Math.max(8, Math.min(window.innerWidth - 8 - pw, rect.left + (rect.width / 2) - (pw / 2))) + 'px';
+            panel.style.top = ((rect.top - 8 - panel.offsetHeight > 0) ? (rect.top - 8 - panel.offsetHeight) : (rect.bottom + 8)) + 'px';
+            getPreferredRate().then(updateActive);
+            window.addEventListener('pointerdown', onOutside, true);
+        };
+
+        btn.addEventListener('mouseenter', () => {
+            if (panel.classList.contains('hidden') && !btn.querySelector('.pzp-button__tooltip')) {
+                const tooltip = document.createElement('span');
+                tooltip.className = 'pzp-button__tooltip pzp-button__tooltip--top';
+                tooltip.textContent = '재생 속도 (<,>)';
+                btn.appendChild(tooltip);
+            }
+        });
+        btn.addEventListener('mouseleave', () => {
+            const tooltip = btn.querySelector('.pzp-button__tooltip');
+            if (tooltip)
+                tooltip.remove();
+        });
+
+        btn.addEventListener('click', e => {
+            e.preventDefault();
+            e.stopPropagation();
+            panel.classList.contains('hidden') ? show() : hide();
+        });
+        __updateSpeedActive(1.0);
+    }
+
+    /**
+     * PIP 버튼의 툴팁을 수정하여 단축키 정보를 표시합니다.
+     */
+    function patchPipButton() {
+        const pipBtn = C.selectors.pipBtns.map(s => document.querySelector(s)).find(el => el);
+        if (!pipBtn)
+            return;
+
+        const newLabel = 'PIP 보기 (p)';
+        if (pipBtn.getAttribute('aria-label') !== newLabel) {
+            pipBtn.setAttribute('aria-label', newLabel);
+        }
+
+        const tooltip = pipBtn.querySelector('.pzp-button__tooltip');
+        if (tooltip && tooltip.textContent !== newLabel) {
+            tooltip.textContent = newLabel;
+        }
+    }
+
+    /**
+     * 라이브 방송 시청 시, 재생 속도가 1배속을 초과하면 자동으로 1배속으로 복구합니다.
+     */
+    function startAutoOneXWatcher() {
+        setInterval(async() => {
+            if (!await GM.getValue(C.storageKeys.autoLive1x, true))
+                return;
+            const v = getVideo();
+            if (!v || v.playbackRate <= 1.0)
+                return;
+            if (__isLive()) {
+                v.playbackRate = 1.0;
+                __updateSpeedActive(1.0);
+            }
+        }, K.AUTO_ONEX_INTERVAL_MS);
+    }
+
+    /**
+     * 스트림 오류 및 멈춤 현상을 감지하여 페이지를 새로고침합니다.
+     */
+    function monitorStream() {
+        if (window.stallCheckInterval)
+            clearInterval(window.stallCheckInterval);
+        if (window.errorCheckInterval)
+            clearInterval(window.errorCheckInterval);
+
+        let lastTime = 0;
+        let stallStart = 0;
+
+        window.errorCheckInterval = setInterval(async() => {
+            const autoRefresh = await GM.getValue(C.storageKeys.autoRefresh, true);
+            if (!autoRefresh || document.hidden)
+                return;
+            const errorDialog = document.querySelector(C.selectors.errorDialog);
+            if (errorDialog && errorDialog.offsetParent !== null) {
+                location.reload();
+            }
+        }, 1000);
+
+        window.stallCheckInterval = setInterval(async() => {
+            const autoRefresh = await GM.getValue(C.storageKeys.autoRefresh, true);
+            const video = getVideo();
+
+            if (!autoRefresh || !video || video.paused || document.hidden) {
+                stallStart = 0;
+                return;
+            }
+
+            if (lastTime > 0 && video.currentTime === lastTime) {
+                if (stallStart === 0) {
+                    stallStart = Date.now();
+                } else if (Date.now() - stallStart >= K.STALL_THRESHOLD_MS) {
+                    location.reload();
+                }
+            } else {
+                stallStart = 0;
+            }
+
+            lastTime = video.currentTime;
+        }, K.STALL_CHECK_INTERVAL_MS);
+    }
+
+    /**
+     * 재생 속도 변경 시 안내 토스트를 화면에 표시합니다.
+     * @param {number} rate - 표시할 재생 속도.
+     */
+    let speedToastTimeoutId = null;
+    function showSpeedToast(rate) {
+        const player = document.querySelector(C.selectors.videoPlayer);
+        if (!player)
+            return;
+
+        let toastContainer = player.querySelector('.chzzk-toast-container');
+        if (!toastContainer) {
+            toastContainer = document.createElement('div');
+            toastContainer.className = 'chzzk-toast-container';
+            Object.assign(toastContainer.style, {
+                position: 'absolute',
+                top: '0',
+                left: '0',
+                width: '100%',
+                height: '100%',
+                zIndex: '9999',
+                pointerEvents: 'none'
+            });
+            player.appendChild(toastContainer);
+        }
+
+        let toast = toastContainer.querySelector('.chzzk-speed-toast');
+        if (!toast) {
+            toast = document.createElement('div');
+            toast.className = 'chzzk-speed-toast';
+            toastContainer.appendChild(toast);
+        }
+
+        toast.textContent = `${rate.toFixed(2).replace(/\.00$/, '')}x`;
+        toast.classList.add('visible');
+
+        clearTimeout(speedToastTimeoutId);
+        speedToastTimeoutId = setTimeout(() => {
+            toast.classList.remove('visible');
+        }, K.TOAST_DISPLAY_TIME_MS);
+    }
+
+    /**
+     * PIP, 재생 속도 조절 등 키보드 단축키를 설정합니다.
+     */
+    function setupKeyboardShortcuts() {
+        window.addEventListener('keydown', async(e) => {
+            const activeEl = document.activeElement;
+            if (activeEl && (['INPUT', 'TEXTAREA'].includes(activeEl.tagName) || activeEl.matches(C.selectors.chatInput))) {
+                return;
+            }
+
+            if (e.key.toLowerCase() === 'p') {
+                e.preventDefault();
+                const pipBtn = C.selectors.pipBtns.map(s => document.querySelector(s)).find(el => el);
+                pipBtn?.click();
+                return;
+            }
+
+            const rates = K.PLAYBACK_RATES;
+            const video = getVideo();
+            if (!video)
+                return;
+
+            let currentIndex = rates.indexOf(video.playbackRate);
+            if (currentIndex === -1) {
+                const closest = rates.reduce((prev, curr) =>
+                        (Math.abs(curr - video.playbackRate) < Math.abs(prev - video.playbackRate) ? curr : prev));
+                currentIndex = rates.indexOf(closest);
+            }
+
+            let newIndex = currentIndex;
+
+            if (e.key === '<' || e.key === ',') {
+                newIndex = Math.max(0, currentIndex - 1);
+            } else if (e.key === '>' || e.key === '.') {
+                newIndex = Math.min(rates.length - 1, currentIndex + 1);
+            } else {
+                return;
+            }
+
+            if (newIndex !== currentIndex) {
+                const newRate = rates[newIndex];
+                await setPreferredRate(newRate);
+                applyPlaybackRate(newRate);
+                showSpeedToast(newRate);
+            }
+        });
+    }
+
+    /**
+     * '선명한 화면' 기능이 활성화된 경우, 관련 외부 스크립트를 주입합니다.
+     * @returns {Promise<void>}
+     */
+    async function injectSharpnessScript() {
+        const enabled = await GM.getValue(C.storageKeys.screenSharpness, false);
+        if (!enabled)
+            return;
+        const script = document.createElement("script");
+        script.src = "https://update.greasyfork.org/scripts/548009/Chzzk%20%EC%84%A0%EB%AA%85%ED%95%9C%20%ED%99%94%EB%A9%B4%20%EC%97%85%EA%B7%B8%EB%A0%88%EC%9D%B4%EB%93%9C.user.js";
+        script.async = true;
+        document.head.appendChild(script);
+    }
+
+    /**
+     * @async
+     * @function init
+     * @description 스크립트의 주요 기능들을 초기화합니다.
+     */
+    async function init() {
+        await(async() => {
+            C.debug = await GM.getValue(C.storageKeys.debugLog, false);
+        })();
+        if ((await GM.getValue(C.storageKeys.quality)) === undefined)
+            await GM.setValue(C.storageKeys.quality, 1080);
+        if ((await GM.getValue(C.storageKeys.autoUnmute)) === undefined)
+            await GM.setValue(C.storageKeys.autoUnmute, true);
+        if ((await GM.getValue(C.storageKeys.autoRefresh)) === undefined)
+            await GM.setValue(C.storageKeys.autoRefresh, true);
+        if ((await GM.getValue(C.storageKeys.screenSharpness)) === undefined)
+            await GM.setValue(C.storageKeys.screenSharpness, false);
+        await GM.setValue(C.storageKeys.playbackRate, 1.0);
+        if ((await GM.getValue(C.storageKeys.autoLive1x)) === undefined)
+            await GM.setValue(C.storageKeys.autoLive1x, true);
+
+        AllInOneMenu.init();
+
+        await quality.applyPreferred();
+        injectSpeedInlineButton();
+        findAndPatchLiveButtons(document);
+        patchPipButton(document);
+        startLiveDotWatcher();
+        startAutoOneXWatcher();
+        monitorStream();
+        setupKeyboardShortcuts();
+        injectSharpnessScript();
+    }
+
+    /**
+     * @function onDomReady
+     * @description DOM 콘텐츠가 로드된 후 스크립트의 실행을 시작하는 진입점 함수.
+     */
+    function onDomReady() {
+        quality.observeManualSelect();
+        observer.start();
+        init().catch(console.error);
+        handler.trackURLChange();
+    }
+    if (document.readyState === "loading")
+        document.addEventListener("DOMContentLoaded", onDomReady);
+    else
+        onDomReady();
+})();
