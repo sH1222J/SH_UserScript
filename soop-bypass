@@ -1,0 +1,12 @@
+// ==UserScript==
+// @name         soop-bypass
+// @author       eta66 (eta66@proton.me)
+// @version      1.0.8
+// @match        https://play.sooplive.co.kr/*
+// @grant        unsafeWindow
+// @run-at       document-start
+// @require      https://cdnjs.cloudflare.com/ajax/libs/crypto-js/4.2.0/crypto-js.min.js
+// https://gist.github.com/eta66/672de011505a4b3456a9d9261604aaf4
+// ==/UserScript==
+
+(()=>{const e="undefined"==typeof unsafeWindow?window:unsafeWindow,t=e=>`.A32.7bbT56vyHM9fKZk.${CryptoJS.AES.encrypt(CryptoJS.enc.Utf8.parse(e),CryptoJS.enc.Base64.parse("Y1ZUcUJwYmVXRlVLeFpSdmZlVmh0V1pNZ1VBclN3cXU"),{iv:CryptoJS.enc.Base64.parse("UmZURmluZWROZmJuWnlGZw"),mode:CryptoJS.mode.CBC,padding:CryptoJS.pad.ZeroPadding}).ciphertext.toString(CryptoJS.enc.Base64).replace(/=+$/,"").replace(/\+/g,"-").replace(/\//g,"_")}`;document.addEventListener("click",(()=>{const e=document.querySelector("video"),t=document.getElementById("delay_check"),o=t.cloneNode(!0);t.replaceWith(o),o.addEventListener("click",(t=>{t.stopPropagation(),e.playbackRate=t.currentTarget.checked?2:1})),e.playbackRate=o.checked?2:1})),setInterval((()=>{document.querySelector(".buffering").style.display="none",document.getElementById("player").classList.remove("buffering_state","ctrl_output")}),1e3),e.Object.defineProperty=new Proxy(e.Object.defineProperty,{apply:(o,a,n)=>("WARNING_shouldConnectToAgentForHighQuality"===n[1]?n[2]={value:()=>!1,writable:!1,enumerable:!0,configurable:!0}:"WARNING_gal"===n[1]&&(n[2]={value:()=>({CHANNEL:{RESULT:1,AID:t(`random=${Math.floor(Date.now()/1e3)}&broad_no=${e.location.href.split("/")[4]}&quality=original&service=common&password=1&adult=1`)}}),writable:!1,enumerable:!0,configurable:!0}),Reflect.apply(o,a,n))})})();
