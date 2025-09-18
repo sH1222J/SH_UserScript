@@ -1,0 +1,10 @@
+// ==UserScript==
+// @name         chzzk-bypass
+// @author       eta66 (eta66@proton.me)
+// @match        https://chzzk.naver.com/*
+// @match        https://*.chzzk.naver.com/*
+// @require      https://unpkg.com/xhook@latest/dist/xhook.min.js
+// https://gist.github.com/eta66/945021800dc3f97dc78cb8f9989dcadf
+// ==/UserScript==
+
+xhook.after(function(t,e){if(-1!==t.url.indexOf("live-detail"))try{let n=JSON.parse(e.text);n.content&&n.content.p2pQuality&&(n.content.p2pQuality=[]),e.text=JSON.stringify(n)}catch(r){console.error(r)}});
