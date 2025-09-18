@@ -1,0 +1,9 @@
+1. 설정 > Brave Shields 및 프라이버시 > 콘텐츠 필터링
+
+2. 트래커 & 광고 차단 > "트래커 및 광고 차단(공격적)" 으로 설정
+
+3. 콘텐츠 필터링 > 맞춤 필터 목록 > YousList 끄기
+
+4. 맞춤 필터 목록 추가 > 맞춤 필터 목록 URL에 https://raw.githubusercontent.com/HelloKS/list-kr-flat/latest/list-kr-flat.txt 입력 > 추가
+
+5. (선택) 갤 필터도 추가하면 좋음. https://raw.githubusercontent.com/Zziniswell/Adguard-gallery-filter/refs/heads/main/filter.txt
