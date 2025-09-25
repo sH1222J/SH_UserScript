@@ -1,0 +1,23 @@
+[AdGuard]
+
+
+!메인피드 차단
+
+||talk-pilsner.kakao.com^
+
+||ik.kakaocdn.net^
+
+
+
+!숏폼 탭 차단
+
+||play.kakao.com^
+
+||shorformstats.kakao.com^
+
+
+
+!쇼핑 탭 차단
+
+||shopper.kakao.com^
+
